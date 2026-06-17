@@ -1,0 +1,19 @@
+{
+  "name": "sei-test",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "scripts": {
+    "start": "bun index.ts",
+    "monitor": "bun monitor.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.16.0"
+  }
+}
