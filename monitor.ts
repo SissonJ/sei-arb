@@ -7,7 +7,7 @@ const INTER_BATCH_DELAY_MS = 0;
 const MIN_PROFIT_USDC = 1.0;
 const HEARTBEAT_EVERY_N_BLOCKS = 50;
 
-const SEI_WS = "wss://misty-chaotic-energy.sei-pacific.quiknode.pro/ee4fe2a7c05a4f87ed6048a930fa4292c820de9b/";
+const SEI_WS = Bun.env.SEI_WS!;
 
 const PUSHOVER_TOKEN = Bun.env.PUSHOVER_TOKEN!;
 const PUSHOVER_USER = Bun.env.PUSHOVER_USER!;
