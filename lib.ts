@@ -57,7 +57,8 @@ function decodeAddress(hex: string): string {
 }
 
 export function decodeUint(hex: string): bigint {
-  return BigInt(hex.startsWith("0x") ? hex : "0x" + hex);
+  const s = hex.startsWith("0x") ? hex : "0x" + hex;
+  return s.length <= 2 ? 0n : BigInt(s);
 }
 
 function decodeString(hex: string): string {
@@ -142,6 +143,8 @@ export function v3SwapAmountOut(
   const L = pool.liquidity;
   const sqrtP = pool.sqrtPriceX96;
 
+  if (L === 0n || sqrtP === 0n) return { amountOut: 0n, tokenOut };
+
   let amountOut: bigint;
   if (zeroForOne) {
     const sqrtP_new = (L * sqrtP * Q96) / (L * Q96 + effectiveIn * sqrtP);
@@ -155,6 +158,7 @@ export function v3SwapAmountOut(
 }
 
 export function fmtAmt(amount: bigint, decimals: number): string {
+  if (amount < 0n) return `-${fmtAmt(-amount, decimals)}`;
   const s = amount.toString().padStart(decimals + 1, "0");
   const intPart = s.slice(0, s.length - decimals) || "0";
   const fracPart = s.slice(s.length - decimals).slice(0, decimals > 6 ? 8 : 6);
@@ -168,6 +172,7 @@ export function getBySymbol(pool: PoolInfo, sym: string) {
 }
 
 export function spotPrice(pool: PoolInfo): string {
+  if (pool.sqrtPriceX96 === 0n) return "no price (uninitialized)";
   const priceRaw = (Number(pool.sqrtPriceX96) / Number(Q96)) ** 2;
   const token1PerToken0 = priceRaw * 10 ** pool.decimals0 / 10 ** pool.decimals1;
   if (token1PerToken0 >= 1) {
