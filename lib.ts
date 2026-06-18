@@ -1,4 +1,4 @@
-const SEI_RPC = Bun.env.SEI_WS!;
+const SEI_RPC = Bun.env.SEI_RPC!;
 
 export const POOLS = {
   // DragonSwap
