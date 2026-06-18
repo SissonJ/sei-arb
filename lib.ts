@@ -83,42 +83,63 @@ export interface PoolInfo {
 
 const tokenMetaCache = new Map<string, { symbol: string; decimals: number }>();
 
+// token0/token1/fee are immutable for a deployed pool — cache them permanently
+type PoolStatic = { token0: string; token1: string; fee: bigint };
+const poolStaticCache = new Map<string, PoolStatic>();
+
 export async function fetchPools(poolAddrs: string[], interBatchDelay = 0): Promise<PoolInfo[]> {
-  const batch1 = poolAddrs.flatMap((addr) => [
-    { to: addr, data: "0x0dfe1681" }, // token0
-    { to: addr, data: "0xd21220a7" }, // token1
+  const uncachedPools = poolAddrs.filter((a) => !poolStaticCache.has(a));
+
+  // slot0 (price) and liquidity change every block — always fetch
+  const dynamicCalls = poolAddrs.flatMap((addr) => [
     { to: addr, data: "0x3850c7bd" }, // slot0
     { to: addr, data: "0x1a686502" }, // liquidity
+  ]);
+
+  // token0/token1/fee only needed once per pool
+  const staticCalls = uncachedPools.flatMap((addr) => [
+    { to: addr, data: "0x0dfe1681" }, // token0
+    { to: addr, data: "0xd21220a7" }, // token1
     { to: addr, data: "0xddca3f43" }, // fee
   ]);
 
-  const r1 = await batchCall(batch1);
+  // Fire both in parallel; on warm cache staticCalls is empty
+  const [dynR, statR] = await Promise.all([
+    batchCall(dynamicCalls),
+    uncachedPools.length > 0 ? batchCall(staticCalls) : Promise.resolve([] as string[]),
+  ]);
 
-  const pools_partial = poolAddrs.map((addr, i) => {
-    const base = i * 5;
-    const token0 = decodeAddress(r1[base]);
-    const token1 = decodeAddress(r1[base + 1]);
-    const sqrtPriceX96 = BigInt("0x" + r1[base + 2].slice(2, 66));
-    const liquidity = decodeUint(r1[base + 3]);
-    const fee = decodeUint(r1[base + 4]);
-    return { address: addr, token0, token1, sqrtPriceX96, liquidity, fee };
+  uncachedPools.forEach((addr, i) => {
+    poolStaticCache.set(addr, {
+      token0: decodeAddress(statR[i * 3]),
+      token1: decodeAddress(statR[i * 3 + 1]),
+      fee:    decodeUint(statR[i * 3 + 2]),
+    });
   });
 
-  const uncachedAddrs = [...new Set(
+  const pools_partial = poolAddrs.map((addr, i) => {
+    const base = i * 2;
+    const sqrtPriceX96 = BigInt("0x" + dynR[base].slice(2, 66));
+    const liquidity = decodeUint(dynR[base + 1]);
+    const st = poolStaticCache.get(addr)!;
+    return { address: addr, ...st, sqrtPriceX96, liquidity };
+  });
+
+  const uncachedTokens = [...new Set(
     pools_partial.flatMap((p) => [p.token0, p.token1])
   )].filter((addr) => !tokenMetaCache.has(addr));
 
-  if (uncachedAddrs.length > 0) {
+  if (uncachedTokens.length > 0) {
     if (interBatchDelay > 0) await sleep(interBatchDelay);
-    const batch2 = uncachedAddrs.flatMap((addr) => [
+    const metaCalls = uncachedTokens.flatMap((addr) => [
       { to: addr, data: "0x95d89b41" }, // symbol
       { to: addr, data: "0x313ce567" }, // decimals
     ]);
-    const r2 = await batchCall(batch2);
-    uncachedAddrs.forEach((addr, i) => {
+    const metaR = await batchCall(metaCalls);
+    uncachedTokens.forEach((addr, i) => {
       tokenMetaCache.set(addr, {
-        symbol: decodeString(r2[i * 2]),
-        decimals: Number(decodeUint(r2[i * 2 + 1])),
+        symbol:   decodeString(metaR[i * 2]),
+        decimals: Number(decodeUint(metaR[i * 2 + 1])),
       });
     });
   }
