@@ -2,13 +2,13 @@ import {
   buildAllPoolAddrs, buildRoutes, findOptimalInput, fetchPools,
   getBySymbol, fmtAmt,
 } from "./lib";
+import type { PoolInfo } from "./lib";
 
-const INTER_BATCH_DELAY_MS = 0;
+const SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
 const MIN_PROFIT_USDC = 1.0;
-const HEARTBEAT_EVERY_N_BLOCKS = 50;
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const SEI_WS = Bun.env.SEI_WS!;
-
 const PUSHOVER_TOKEN = Bun.env.PUSHOVER_TOKEN!;
 const PUSHOVER_USER = Bun.env.PUSHOVER_USER!;
 
@@ -20,103 +20,105 @@ async function notify(title: string, message: string) {
   });
 }
 
-async function checkBlock(blockNum: number) {
-  const pools = await fetchPools(buildAllPoolAddrs(), INTER_BATCH_DELAY_MS);
-  const [dsUsdcWsei, dsWseiWbtc, dsWbtcUsdc, ssUsdcWsei1, ssUsdcWsei2] = pools;
-
-  const usdc = getBySymbol(dsUsdcWsei, "USDC");
-  const wsei = getBySymbol(dsUsdcWsei, "WSEI");
-  const wbtc = getBySymbol(dsWseiWbtc, "WBTC");
-
-  const routes = buildRoutes(
-    dsUsdcWsei, dsWseiWbtc, dsWbtcUsdc, ssUsdcWsei1, ssUsdcWsei2,
-    usdc, wsei, wbtc,
-  );
-
-  let bestPct = -Infinity;
-  let bestLabel = "";
-  let bestSize = 0n;
-
-  for (const { label, hops } of routes) {
-    // Quick probe with a small amount — skip the sizing work if unprofitable
-    const probe = findOptimalInput(hops, usdc.dec);
-    if (probe.maxProfit > bestPct) { bestPct = probe.maxProfit; bestLabel = label; bestSize = probe.optimalInput; }
-
-    if (probe.maxProfit < MIN_PROFIT_USDC) continue;
-
-    const msg = `size ${fmtAmt(probe.optimalInput, usdc.dec)} USDC → +${probe.maxProfit.toFixed(4)} USDC | ${label}`;
-    await notify("Sei Arb OPPORTUNITY", msg);
-  }
-
-  return { bestPct, bestLabel, bestSize, usdcDec: usdc.dec };
-}
-
-function connect(onBlock: (blockNum: number) => void): WebSocket {
-  const ws = new WebSocket(SEI_WS);
-
-  ws.onopen = () => {
-    ws.send(JSON.stringify({
-      jsonrpc: "2.0", id: 1,
-      method: "eth_subscribe",
-      params: ["newHeads"],
-    }));
-    console.log(`[ws] connected, subscribed to newHeads`);
+// Non-indexed Swap data layout (each field is a 32-byte ABI word):
+//   [0..64]   amount0     (int256)
+//   [64..128] amount1     (int256)
+//   [128..192] sqrtPriceX96 (uint160)
+//   [192..256] liquidity  (uint128)
+//   [256..320] tick       (int24)
+function parseSwapLog(data: string): { sqrtPriceX96: bigint; liquidity: bigint } {
+  const d = data.slice(2);
+  return {
+    sqrtPriceX96: BigInt("0x" + d.slice(128, 192)),
+    liquidity:    BigInt("0x" + d.slice(192, 256)),
   };
-
-  ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data as string);
-    // Subscription confirmation — ignore
-    if (msg.id === 1) return;
-    // New block notification
-    if (msg.method === "eth_subscription" && msg.params?.result?.number) {
-      const blockNum = parseInt(msg.params.result.number, 16);
-      onBlock(blockNum);
-    }
-  };
-
-  ws.onerror = (err) => {
-    console.error("[ws] error:", err);
-  };
-
-  return ws;
 }
 
 async function monitor() {
-  let processing = false;
-  let blockCount = 0;
+  const poolAddrs = buildAllPoolAddrs();
 
-  const onBlock = async (blockNum: number) => {
-    blockCount++;
+  async function loadState(): Promise<Map<string, PoolInfo>> {
+    const pools = await fetchPools(poolAddrs);
+    const m = new Map<string, PoolInfo>();
+    for (const p of pools) m.set(p.address, p);
+    return m;
+  }
 
-    if (processing) return;
-    processing = true;
-    const t0 = Date.now();
+  console.log("Fetching initial pool state...");
+  let poolState = await loadState();
 
-    try {
-      const { bestPct, bestLabel, bestSize, usdcDec } = await checkBlock(blockNum);
-      const elapsed = Date.now() - t0;
-
-      if (blockCount % HEARTBEAT_EVERY_N_BLOCKS === 0) {
-        console.log(`[${blockNum}] heartbeat — best route: ${bestPct >= 0 ? "+" : ""}${bestPct.toFixed(4)} USDC | size ${fmtAmt(bestSize, usdcDec)} USDC | ${bestLabel} (${elapsed}ms)`);
-      }
-    } catch (err) {
-      console.error(`[${blockNum}] error (${Date.now() - t0}ms):`, err);
-    } finally {
-      processing = false;
-    }
+  const dsUsdcWsei = poolState.get(poolAddrs[0])!;
+  const dsWseiWbtc = poolState.get(poolAddrs[1])!;
+  const tokenRefs = {
+    usdc: getBySymbol(dsUsdcWsei, "USDC"),
+    wsei: getBySymbol(dsUsdcWsei, "WSEI"),
+    wbtc: getBySymbol(dsWseiWbtc, "WBTC"),
   };
 
-  // Connect with auto-reconnect on close
-  function startWs() {
-    const ws = connect(onBlock);
-    ws.onclose = () => {
-      console.log("[ws] disconnected — reconnecting in 2s...");
-      setTimeout(startWs, 2000);
+  let swapCount = 0;
+  let lastBest = { pct: -Infinity, label: "", size: 0n };
+
+  function onSwap(poolAddr: string, sqrtPriceX96: bigint, liquidity: bigint) {
+    const pool = poolState.get(poolAddr);
+    if (!pool) return;
+
+    poolState.set(poolAddr, { ...pool, sqrtPriceX96, liquidity });
+    swapCount++;
+
+    const [p0, p1, p2, p3, p4] = poolAddrs.map(a => poolState.get(a)!);
+    const routes = buildRoutes(p0, p1, p2, p3, p4, tokenRefs.usdc, tokenRefs.wsei, tokenRefs.wbtc);
+
+    let best = { pct: -Infinity, label: "", size: 0n };
+    for (const { label, hops } of routes) {
+      const { optimalInput, maxProfit } = findOptimalInput(hops, tokenRefs.usdc.dec);
+      if (maxProfit > best.pct) best = { pct: maxProfit, label, size: optimalInput };
+      if (maxProfit >= MIN_PROFIT_USDC) {
+        const msg = `size ${fmtAmt(optimalInput, tokenRefs.usdc.dec)} USDC → +${maxProfit.toFixed(4)} USDC | ${label}`;
+        notify("Sei Arb OPPORTUNITY", msg).catch(console.error);
+      }
+    }
+    lastBest = best;
+  }
+
+  setInterval(() => {
+    const { pct, label, size } = lastBest;
+    console.log(`[heartbeat] swaps=${swapCount}  best: ${pct >= 0 ? "+" : ""}${pct.toFixed(4)} USDC | size ${fmtAmt(size, tokenRefs.usdc.dec)} USDC | ${label}`);
+  }, HEARTBEAT_INTERVAL_MS);
+
+  function connect() {
+    const ws = new WebSocket(SEI_WS);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0", id: 1,
+        method: "eth_subscribe",
+        params: ["logs", { address: poolAddrs, topics: [SWAP_TOPIC] }],
+      }));
+      console.log("[ws] connected, subscribed to Swap logs");
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data as string);
+      if (msg.id === 1) return;
+      if (msg.method !== "eth_subscription") return;
+      const log = msg.params?.result;
+      if (!log?.data || !log?.address) return;
+      const { sqrtPriceX96, liquidity } = parseSwapLog(log.data);
+      onSwap(log.address.toLowerCase(), sqrtPriceX96, liquidity);
+    };
+
+    ws.onerror = (err) => console.error("[ws] error:", err);
+
+    ws.onclose = async () => {
+      console.log("[ws] disconnected — reloading state and reconnecting in 2s...");
+      await new Promise(r => setTimeout(r, 2000));
+      poolState = await loadState();
+      connect();
     };
   }
 
-  startWs();
-  console.log(`Monitor started  min_profit=${MIN_PROFIT_USDC} USDC  batch_delay=${INTER_BATCH_DELAY_MS}ms`);
+  connect();
+  console.log(`Monitor started  min_profit=${MIN_PROFIT_USDC} USDC`);
 }
 
 monitor().catch(console.error);

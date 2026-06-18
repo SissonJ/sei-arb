@@ -36,13 +36,17 @@ export async function batchCall(calls: BatchItem[], retries = 5): Promise<string
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(batch),
     });
-    const json = (await res.json()) as Array<{ result?: string; error?: { message: string } }>;
+    const raw = await res.json();
+    // Some nodes return a top-level error object instead of an array on HTTP-level rate limits
+    const json = Array.isArray(raw) ? raw as Array<{ result?: string; error?: { message: string } }> : [];
+    const topLevelMsg = !Array.isArray(raw) ? (raw as { error?: { message?: string }; message?: string })?.error?.message ?? (raw as { message?: string })?.message ?? "" : "";
 
-    const rateLimited = json.some((r) => r.error?.message?.includes("rate limit") || r.error?.message?.includes("server busy"));
-    if (rateLimited) {
+    const isRateLimited = (msg: string) => msg.includes("rate limit") || msg.includes("server busy") || msg.includes("request limit reached");
+    if (isRateLimited(topLevelMsg) || json.some((r) => isRateLimited(r.error?.message ?? ""))) {
       await sleep(1500 * (attempt + 1));
       continue;
     }
+    if (topLevelMsg) throw new Error(`RPC error: ${topLevelMsg}`);
 
     return json.map((r, i) => {
       if (r.error) throw new Error(`Call ${i} (${calls[i].data.slice(0, 10)}): ${r.error.message}`);
@@ -119,7 +123,8 @@ export async function fetchPools(poolAddrs: string[], interBatchDelay = 0): Prom
 
   const pools_partial = poolAddrs.map((addr, i) => {
     const base = i * 2;
-    const sqrtPriceX96 = BigInt("0x" + dynR[base].slice(2, 66));
+    const raw = dynR[base].slice(2, 66);
+    const sqrtPriceX96 = raw.length > 0 ? BigInt("0x" + raw) : 0n;
     const liquidity = decodeUint(dynR[base + 1]);
     const st = poolStaticCache.get(addr)!;
     return { address: addr, ...st, sqrtPriceX96, liquidity };
