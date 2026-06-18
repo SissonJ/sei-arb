@@ -1,4 +1,4 @@
-const SEI_RPC = "https://misty-chaotic-energy.sei-pacific.quiknode.pro/ee4fe2a7c05a4f87ed6048a930fa4292c820de9b/";
+const SEI_RPC = Bun.env.SEI_WS!;
 
 export const POOLS = {
   // DragonSwap
