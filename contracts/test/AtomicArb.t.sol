@@ -169,9 +169,11 @@ contract AtomicArbTest is Test {
 
         // Demand more profit than the route can deliver → must revert
         uint256 impossibleMinProfit = 500e6;
+        usdc.mint(address(arb), 1000e6);
 
         vm.expectRevert("Insufficient profit");
         arb.executeArb(address(pool1), address(usdc), borrowAmount, route, impossibleMinProfit);
+        assertEq(usdc.balanceOf(address(arb)), 1000e6);
     }
 
     // ── Only owner can execute ────────────────────────────────────────────────

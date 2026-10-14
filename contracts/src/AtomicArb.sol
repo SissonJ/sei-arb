@@ -44,6 +44,7 @@ contract AtomicArb {
     address public immutable owner;
     address private activeFlashPool;
     bytes32 private activeFlashHash;
+    uint256 private activeStartingBalance;
     address private activeSwapPool;
     address private activeSwapToken;
     uint256 private activeSwapAmount;
@@ -81,6 +82,7 @@ contract AtomicArb {
         bytes memory data = abi.encode(flashPool, flashToken, route, borrowAmount, minProfit);
         activeFlashPool = flashPool;
         activeFlashHash = keccak256(data);
+        activeStartingBalance = IERC20(flashToken).balanceOf(address(this));
         IUniswapV3Pool(flashPool).flash(
             address(this),
             isToken0 ? borrowAmount : 0,
@@ -110,8 +112,10 @@ contract AtomicArb {
             keccak256(data) == activeFlashHash,
             "Unauthorized flash"
         );
+        uint256 startingBalance = activeStartingBalance;
         activeFlashPool = address(0);
         activeFlashHash = bytes32(0);
+        activeStartingBalance = 0;
 
         // Execute every hop in the route
         uint256 amountIn = borrowAmount;
@@ -125,7 +129,7 @@ contract AtomicArb {
         uint256 repayAmount = borrowAmount + flashFee;
 
         uint256 balance = IERC20(flashToken).balanceOf(address(this));
-        require(balance >= repayAmount + minProfit, "Insufficient profit");
+        require(balance >= startingBalance + repayAmount + minProfit, "Insufficient profit");
 
         safeTransfer(flashToken, flashPool, repayAmount);
         // remaining balance is profit; stays in contract until owner withdraws
