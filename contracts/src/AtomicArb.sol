@@ -42,6 +42,11 @@ contract AtomicArb {
     uint160 private constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
 
     address public immutable owner;
+    address private activeFlashPool;
+    bytes32 private activeFlashHash;
+    address private activeSwapPool;
+    address private activeSwapToken;
+    uint256 private activeSwapAmount;
 
     struct SwapStep {
         address pool;       // V3 pool address
@@ -71,14 +76,18 @@ contract AtomicArb {
         SwapStep[] calldata route,
         uint256 minProfit
     ) external onlyOwner {
+        require(activeFlashPool == address(0), "Arb active");
         bool isToken0 = IUniswapV3Pool(flashPool).token0() == flashToken;
         bytes memory data = abi.encode(flashPool, flashToken, route, borrowAmount, minProfit);
+        activeFlashPool = flashPool;
+        activeFlashHash = keccak256(data);
         IUniswapV3Pool(flashPool).flash(
             address(this),
             isToken0 ? borrowAmount : 0,
             isToken0 ? 0 : borrowAmount,
             data
         );
+        require(activeFlashPool == address(0), "Flash callback missing");
     }
 
     /// @dev Called by the flash pool after transferring borrowed tokens to this contract.
@@ -95,7 +104,14 @@ contract AtomicArb {
             uint256 minProfit
         ) = abi.decode(data, (address, address, SwapStep[], uint256, uint256));
 
-        require(msg.sender == flashPool, "Unauthorized flash");
+        require(
+            msg.sender == activeFlashPool &&
+            msg.sender == flashPool &&
+            keccak256(data) == activeFlashHash,
+            "Unauthorized flash"
+        );
+        activeFlashPool = address(0);
+        activeFlashHash = bytes32(0);
 
         // Execute every hop in the route
         uint256 amountIn = borrowAmount;
@@ -122,13 +138,24 @@ contract AtomicArb {
         bytes calldata data
     ) external {
         (address pool, address tokenIn) = abi.decode(data, (address, address));
-        require(msg.sender == pool, "Unauthorized swap");
+        require(
+            msg.sender == activeSwapPool &&
+            pool == activeSwapPool &&
+            tokenIn == activeSwapToken,
+            "Unauthorized swap"
+        );
+        require((amount0Delta > 0) != (amount1Delta > 0), "Invalid swap delta");
 
         // Exactly one delta is positive (what we owe the pool); the other is zero or negative
         // forge-lint: disable-next-line(unsafe-typecast)
         uint256 amountOwed = amount0Delta > 0
             ? uint256(amount0Delta)
             : uint256(amount1Delta);
+        require(amountOwed <= activeSwapAmount, "Excess swap payment");
+
+        activeSwapPool = address(0);
+        activeSwapToken = address(0);
+        activeSwapAmount = 0;
 
         safeTransfer(tokenIn, msg.sender, amountOwed);
     }
@@ -148,6 +175,9 @@ contract AtomicArb {
     {
         require(amountIn <= uint256(type(int256).max), "amountIn overflow");
         bytes memory cbData = abi.encode(step.pool, step.tokenIn);
+        activeSwapPool = step.pool;
+        activeSwapToken = step.tokenIn;
+        activeSwapAmount = amountIn;
         (int256 amount0, int256 amount1) = IUniswapV3Pool(step.pool).swap(
             address(this),
             step.zeroForOne,
@@ -157,6 +187,7 @@ contract AtomicArb {
             step.zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1,
             cbData
         );
+        require(activeSwapPool == address(0), "Swap callback missing");
         // output delta is always negative (pool paid us); negate to get positive amount
         // forge-lint: disable-next-line(unsafe-typecast)
         amountOut = step.zeroForOne ? uint256(-amount1) : uint256(-amount0);

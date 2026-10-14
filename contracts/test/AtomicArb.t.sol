@@ -186,15 +186,28 @@ contract AtomicArbTest is Test {
 
     // ── Unauthorized flash callback ───────────────────────────────────────────
 
-    function test_revertOnUnauthorizedFlash() public {
+    function test_revertOnForgedFlashCallback() public {
+        address attacker = address(0xBEEF);
         bytes memory data = abi.encode(
-            address(0xDEAD), address(usdc),
+            attacker, address(usdc),
             new AtomicArb.SwapStep[](0),
             uint256(0), uint256(0)
         );
         vm.expectRevert("Unauthorized flash");
-        // call flash callback directly from a non-pool address
+        vm.prank(attacker);
         arb.uniswapV3FlashCallback(0, 0, data);
+    }
+
+    function test_revertOnForgedSwapCallback() public {
+        address attacker = address(0xBEEF);
+        usdc.mint(address(arb), 100e6);
+
+        vm.expectRevert("Unauthorized swap");
+        vm.prank(attacker);
+        arb.uniswapV3SwapCallback(int256(100e6), -1, abi.encode(attacker, address(usdc)));
+
+        assertEq(usdc.balanceOf(address(arb)), 100e6);
+        assertEq(usdc.balanceOf(attacker), 0);
     }
 
     // ── Withdraw ──────────────────────────────────────────────────────────────
