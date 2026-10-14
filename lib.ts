@@ -1,4 +1,5 @@
-const SEI_RPC = Bun.env.SEI_RPC!;
+const SEI_RPC = process.env.SEI_RPC;
+if (!SEI_RPC) throw new Error("SEI_RPC env var required");
 
 export const POOLS = {
   // DragonSwap

@@ -1,6 +1,11 @@
 # dependencies (bun install)
 node_modules
 
+# Foundry build artifacts
+contracts/out
+contracts/cache
+contracts/broadcast
+
 # output
 out
 dist
