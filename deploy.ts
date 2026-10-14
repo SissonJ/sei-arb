@@ -2,7 +2,7 @@
  * Deploy AtomicArb to SEI.
  *
  * Required env vars:
- *   SEI_RPC      — RPC endpoint (already used by lib.ts)
+ *   SEI_RPC: RPC endpoint
  *   PRIVATE_KEY  — deployer private key (hex, 0x-prefixed or raw)
  *
  * Usage:
@@ -13,7 +13,8 @@ import { ethers } from "ethers";
 import { readFileSync } from "fs";
 import { join } from "path";
 
-const SEI_RPC = process.env.SEI_RPC ?? "https://misty-chaotic-energy.sei-pacific.quiknode.pro/ee4fe2a7c05a4f87ed6048a930fa4292c820de9b/";
+const SEI_RPC = process.env.SEI_RPC;
+if (!SEI_RPC) throw new Error("SEI_RPC env var required");
 const PRIVATE_KEY = process.env.PRIVATE_KEY;
 if (!PRIVATE_KEY) throw new Error("PRIVATE_KEY env var required");
 

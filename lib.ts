@@ -1,4 +1,5 @@
-const SEI_RPC = "https://misty-chaotic-energy.sei-pacific.quiknode.pro/ee4fe2a7c05a4f87ed6048a930fa4292c820de9b/";
+const SEI_RPC = process.env.SEI_RPC;
+if (!SEI_RPC) throw new Error("SEI_RPC env var required");
 
 export const POOLS = {
   // DragonSwap
