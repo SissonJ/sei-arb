@@ -2,17 +2,17 @@ import { HDNodeWallet, Wallet } from "ethers";
 
 const SEI_RPC = Bun.env.SEI_RPC!;
 
+// All pools are DragonSwap (Saphyre) V3. SailorSwap pools are not used: their prices are off,
+// but they hold almost no liquidity, so they only give false opportunities.
+// Routes are generated from this list, so a new pool here adds its routes automatically.
 export const POOLS = {
-  // DragonSwap
-  DS_USDC_WSEI: "0xcca2352200a63eb0aaba2d40ba69b1d32174f285",
-  DS_WSEI_WBTC: "0x3e00dd875fef6ce2209007c1e625d9a656e32556",
-  DS_WBTC_USDC: "0xe62fd4661c85e126744cc335e9bca8ae3d5d19d1",
-  // SailorSwap
-  SS_USDC_WSEI_1: "0x80fe558c54f1f43263e08f0e1fa3e02d8b897f93",
-  SS_USDC_WSEI_2: "0x038aac60e1d17ce2229812eca8ee7800214baffc",
+  DS_USDC_WSEI:    "0xcca2352200a63eb0aaba2d40ba69b1d32174f285", // 0.3%
+  DS_WSEI_WBTC:    "0x3e00dd875fef6ce2209007c1e625d9a656e32556", // 0.3%
+  DS_WBTC_USDC:    "0xe62fd4661c85e126744cc335e9bca8ae3d5d19d1", // 0.3%
+  DS_WBTC_USDC_05: "0x3d20e9286c1bccf210aa4b3d31c3b70b69a9cb04", // 0.05%, thin (~$40k)
+  DS_USDT0_WSEI:   "0xb243320bcf9c95db7f74108b6773b8f4dc3adaf5", // 0.3%
+  DS_USDT0_USDC:   "0xf62bd525e82577a162de88bd70de032a62675237", // 0.01%
 };
-
-const DS_ADDRS = new Set([POOLS.DS_USDC_WSEI, POOLS.DS_WSEI_WBTC, POOLS.DS_WBTC_USDC]);
 
 export const Q96 = 2n ** 96n;
 
@@ -210,8 +210,8 @@ export function spotPrice(pool: PoolInfo): string {
   }
 }
 
-export function dexLabel(addr: string): string {
-  return DS_ADDRS.has(addr.toLowerCase()) ? "DragonSwap" : "SailorSwap";
+export function poolLabel(pool: PoolInfo): string {
+  return `${pool.symbol0}/${pool.symbol1} ${Number(pool.fee) / 10_000}%`;
 }
 
 export interface Hop { pool: PoolInfo; tokenIn: string }
@@ -257,7 +257,7 @@ export function printRoute(
     const outSym = zeroForOne ? hop.pool.symbol1  : hop.pool.symbol0;
     const outDec = zeroForOne ? hop.pool.decimals1 : hop.pool.decimals0;
     const result = v3SwapAmountOut(hop.pool, hop.tokenIn, amount);
-    console.log(`  [${dexLabel(hop.pool.address)} ${hop.pool.symbol0}/${hop.pool.symbol1}]  ${fmtAmt(amount, inDec)} ${inSym}  ->  ${fmtAmt(result.amountOut, outDec)} ${outSym}`);
+    console.log(`  [${poolLabel(hop.pool)}]  ${fmtAmt(amount, inDec)} ${inSym}  ->  ${fmtAmt(result.amountOut, outDec)} ${outSym}`);
     amount = result.amountOut;
   }
 
@@ -266,124 +266,44 @@ export function printRoute(
   return result;
 }
 
-export interface TokenRefs {
-  usdc: { addr: string; dec: number };
-  wsei: { addr: string; dec: number };
-  wbtc: { addr: string; dec: number };
-}
-
 export function buildAllPoolAddrs() {
-  return [
-    POOLS.DS_USDC_WSEI,
-    POOLS.DS_WSEI_WBTC,
-    POOLS.DS_WBTC_USDC,
-    POOLS.SS_USDC_WSEI_1,
-    POOLS.SS_USDC_WSEI_2,
-  ];
+  return Object.values(POOLS);
 }
 
+function routeLabel(hops: Hop[]): string {
+  const first = hops[0]!;
+  const startSym = first.tokenIn === first.pool.token0 ? first.pool.symbol0 : first.pool.symbol1;
+  return startSym + hops.map((h) => {
+    const outSym = h.tokenIn === h.pool.token0 ? h.pool.symbol1 : h.pool.symbol0;
+    return ` -> ${outSym} [${poolLabel(h.pool)}]`;
+  }).join("");
+}
+
+// Finds every cycle that starts and ends with startToken and goes through 2 to maxHops different pools.
+// Each cycle comes once for each direction.
 export function buildRoutes(
-  dsUsdcWsei: PoolInfo,
-  dsWseiWbtc: PoolInfo,
-  dsWbtcUsdc: PoolInfo,
-  ssUsdcWsei1: PoolInfo,
-  ssUsdcWsei2: PoolInfo,
-  usdc: { addr: string },
-  wsei: { addr: string },
-  wbtc: { addr: string },
+  pools: PoolInfo[],
+  startToken: string,
+  maxHops = 3,
 ): Array<{ label: string; hops: Hop[] }> {
-  return [
-    {
-      label: "USDC -> WSEI [DS] -> WBTC [DS] -> USDC [DS]",
-      hops: [
-        { pool: dsUsdcWsei, tokenIn: usdc.addr },
-        { pool: dsWseiWbtc, tokenIn: wsei.addr },
-        { pool: dsWbtcUsdc, tokenIn: wbtc.addr },
-      ],
-    },
-    {
-      label: "USDC -> WBTC [DS] -> WSEI [DS] -> USDC [DS]",
-      hops: [
-        { pool: dsWbtcUsdc, tokenIn: usdc.addr },
-        { pool: dsWseiWbtc, tokenIn: wbtc.addr },
-        { pool: dsUsdcWsei, tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [SS1] -> WBTC [DS] -> USDC [DS]",
-      hops: [
-        { pool: ssUsdcWsei1, tokenIn: usdc.addr },
-        { pool: dsWseiWbtc,  tokenIn: wsei.addr },
-        { pool: dsWbtcUsdc,  tokenIn: wbtc.addr },
-      ],
-    },
-    {
-      label: "USDC -> WBTC [DS] -> WSEI [DS] -> USDC [SS1]",
-      hops: [
-        { pool: dsWbtcUsdc,  tokenIn: usdc.addr },
-        { pool: dsWseiWbtc,  tokenIn: wbtc.addr },
-        { pool: ssUsdcWsei1, tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [SS2] -> WBTC [DS] -> USDC [DS]",
-      hops: [
-        { pool: ssUsdcWsei2, tokenIn: usdc.addr },
-        { pool: dsWseiWbtc,  tokenIn: wsei.addr },
-        { pool: dsWbtcUsdc,  tokenIn: wbtc.addr },
-      ],
-    },
-    {
-      label: "USDC -> WBTC [DS] -> WSEI [DS] -> USDC [SS2]",
-      hops: [
-        { pool: dsWbtcUsdc,  tokenIn: usdc.addr },
-        { pool: dsWseiWbtc,  tokenIn: wbtc.addr },
-        { pool: ssUsdcWsei2, tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [DS] -> USDC [SS1]",
-      hops: [
-        { pool: dsUsdcWsei,  tokenIn: usdc.addr },
-        { pool: ssUsdcWsei1, tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [SS1] -> USDC [DS]",
-      hops: [
-        { pool: ssUsdcWsei1, tokenIn: usdc.addr },
-        { pool: dsUsdcWsei,  tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [DS] -> USDC [SS2]",
-      hops: [
-        { pool: dsUsdcWsei,  tokenIn: usdc.addr },
-        { pool: ssUsdcWsei2, tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [SS2] -> USDC [DS]",
-      hops: [
-        { pool: ssUsdcWsei2, tokenIn: usdc.addr },
-        { pool: dsUsdcWsei,  tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [SS1] -> USDC [SS2]",
-      hops: [
-        { pool: ssUsdcWsei1, tokenIn: usdc.addr },
-        { pool: ssUsdcWsei2, tokenIn: wsei.addr },
-      ],
-    },
-    {
-      label: "USDC -> WSEI [SS2] -> USDC [SS1]",
-      hops: [
-        { pool: ssUsdcWsei2, tokenIn: usdc.addr },
-        { pool: ssUsdcWsei1, tokenIn: wsei.addr },
-      ],
-    },
-  ];
+  const start = startToken.toLowerCase();
+  const routes: Array<{ label: string; hops: Hop[] }> = [];
+
+  const walk = (token: string, hops: Hop[]) => {
+    if (hops.length > 0 && token === start) {
+      routes.push({ label: routeLabel(hops), hops });
+      return;
+    }
+    if (hops.length === maxHops) return;
+    for (const pool of pools) {
+      if (hops.some((h) => h.pool.address === pool.address)) continue;
+      if (token === pool.token0) walk(pool.token1, [...hops, { pool, tokenIn: pool.token0 }]);
+      else if (token === pool.token1) walk(pool.token0, [...hops, { pool, tokenIn: pool.token1 }]);
+    }
+  };
+
+  walk(start, []);
+  return routes;
 }
 
 // Ternary search for the input amount that maximises absolute profit.

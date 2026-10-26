@@ -2,8 +2,13 @@ import { Contract, JsonRpcProvider } from "ethers";
 import { fmtAmt, loadWallet } from "./lib";
 import type { Hop } from "./lib";
 
-// DragonSwap USDT0/USDC 0.01% pool. It is on no route, so its flash does not lock a route pool.
-const FLASH_POOL = "0xf62BD525E82577a162DE88bD70dE032a62675237";
+// DragonSwap 0.01% USDC pools to borrow from, in order of preference.
+// A route cannot borrow from one of its own pools, because the flash locks that pool.
+const FLASH_POOLS = [
+  "0xc1b96fa8421807c5bac89ba699c75737c81feea5", // USDY/USDC, about 525k USDC
+  "0xf62bd525e82577a162de88bd70de032a62675237", // USDT0/USDC, about 68k USDC
+];
+// The fee of every pool in FLASH_POOLS
 export const FLASH_FEE = 0.0001;
 
 const SEI_MAINNET_CHAIN_ID = 1329n;
@@ -43,9 +48,9 @@ export async function createExecutor(cfg: ExecutorConfig) {
   const fmt = (x: bigint) => fmtAmt(x, cfg.token.dec);
   let busy = false;
 
-  async function simulate(hops: object[], amount: bigint): Promise<SimResult> {
+  async function simulate(flashPool: string, hops: object[], amount: bigint): Promise<SimResult> {
     try {
-      const profit: bigint = await execute.staticCall(FLASH_POOL, cfg.token.addr, amount, hops, cfg.minProfit);
+      const profit: bigint = await execute.staticCall(flashPool, cfg.token.addr, amount, hops, cfg.minProfit);
       return { amount, profit };
     } catch (err) {
       return { amount, error: (err as { shortMessage?: string }).shortMessage ?? String(err) };
@@ -58,12 +63,17 @@ export async function createExecutor(cfg: ExecutorConfig) {
     if (busy) return;
     busy = true;
     try {
+      const flashPool = FLASH_POOLS.find((f) => !hops.some((h) => h.pool.address === f));
+      if (!flashPool) {
+        console.log(`[exec] no flash pool off the route | ${label}`);
+        return;
+      }
       const callHops = hops.map((h) => ({
         pool: h.pool.address,
         zeroForOne: h.tokenIn.toLowerCase() === h.pool.token0.toLowerCase(),
       }));
 
-      const sims = await Promise.all(SIZE_DIVISORS.map((d) => simulate(callHops, modelAmount / d)));
+      const sims = await Promise.all(SIZE_DIVISORS.map((d) => simulate(flashPool, callHops, modelAmount / d)));
       let best: { amount: bigint; profit: bigint } | undefined;
       for (const s of sims) {
         if ("profit" in s && (!best || s.profit > best.profit)) best = s;
@@ -81,7 +91,7 @@ export async function createExecutor(cfg: ExecutorConfig) {
         return;
       }
 
-      const tx = await execute(FLASH_POOL, cfg.token.addr, best.amount, callHops, cfg.minProfit, { gasLimit: GAS_LIMIT });
+      const tx = await execute(flashPool, cfg.token.addr, best.amount, callHops, cfg.minProfit, { gasLimit: GAS_LIMIT });
       console.log(`[exec] sent ${tx.hash} ${summary}`);
       // wait() throws if the transaction reverts
       const receipt = await tx.wait();

@@ -1,6 +1,6 @@
 import {
   buildAllPoolAddrs, buildRoutes, findOptimalInput, fetchPools,
-  getBySymbol, fmtAmt,
+  getBySymbol, fmtAmt, POOLS,
 } from "./lib";
 import type { PoolInfo } from "./lib";
 import { createExecutor, FLASH_FEE } from "./executor";
@@ -52,21 +52,16 @@ async function monitor() {
   console.log("Fetching initial pool state...");
   let poolState = await loadState();
 
-  const dsUsdcWsei = poolState.get(poolAddrs[0])!;
-  const dsWseiWbtc = poolState.get(poolAddrs[1])!;
-  const tokenRefs = {
-    usdc: getBySymbol(dsUsdcWsei, "USDC"),
-    wsei: getBySymbol(dsUsdcWsei, "WSEI"),
-    wbtc: getBySymbol(dsWseiWbtc, "WBTC"),
-  };
+  const usdc = getBySymbol(poolState.get(POOLS.DS_USDC_WSEI)!, "USDC");
+  const routeCount = buildRoutes([...poolState.values()], usdc.addr).length;
 
   const tryExecute = ARB_CONTRACT
     ? await createExecutor({
         rpc: Bun.env.SEI_RPC!,
         contract: ARB_CONTRACT,
         privateKey: ARB_PRIVATE_KEY!,
-        token: tokenRefs.usdc,
-        minProfit: BigInt(Math.round(MIN_PROFIT_USDC * 10 ** tokenRefs.usdc.dec)),
+        token: usdc,
+        minProfit: BigInt(Math.round(MIN_PROFIT_USDC * 10 ** usdc.dec)),
         send: ARB_SEND,
         notify: (title, message) => { notify(title, message).catch(console.error); },
       })
@@ -82,20 +77,20 @@ async function monitor() {
     poolState.set(poolAddr, { ...pool, sqrtPriceX96, liquidity });
     swapCount++;
 
-    const [p0, p1, p2, p3, p4] = poolAddrs.map(a => poolState.get(a)!);
-    const routes = buildRoutes(p0, p1, p2, p3, p4, tokenRefs.usdc, tokenRefs.wsei, tokenRefs.wbtc);
+    // Rebuild the routes, because each swap replaces the pool object with a new one
+    const routes = buildRoutes([...poolState.values()], usdc.addr);
 
     let best = { pct: -Infinity, label: "", size: 0n };
     let bestHops = routes[0]!.hops;
     for (const { label, hops } of routes) {
-      const { optimalInput, maxProfit } = findOptimalInput(hops, tokenRefs.usdc.dec);
-      const netProfit = maxProfit - (Number(optimalInput) / 10 ** tokenRefs.usdc.dec) * FLASH_FEE;
+      const { optimalInput, maxProfit } = findOptimalInput(hops, usdc.dec);
+      const netProfit = maxProfit - (Number(optimalInput) / 10 ** usdc.dec) * FLASH_FEE;
       if (netProfit > best.pct) {
         best = { pct: netProfit, label, size: optimalInput };
         bestHops = hops;
       }
       if (netProfit >= MIN_PROFIT_USDC) {
-        const msg = `size ${fmtAmt(optimalInput, tokenRefs.usdc.dec)} USDC → +${netProfit.toFixed(4)} USDC | ${label}`;
+        const msg = `size ${fmtAmt(optimalInput, usdc.dec)} USDC → +${netProfit.toFixed(4)} USDC | ${label}`;
         notify("Sei Arb OPPORTUNITY", msg).catch(console.error);
       }
     }
@@ -108,7 +103,7 @@ async function monitor() {
 
   setInterval(() => {
     const { pct, label, size } = lastBest;
-    console.log(`[heartbeat] swaps=${swapCount}  best: ${pct >= 0 ? "+" : ""}${pct.toFixed(4)} USDC | size ${fmtAmt(size, tokenRefs.usdc.dec)} USDC | ${label}`);
+    console.log(`[heartbeat] swaps=${swapCount}  best: ${pct >= 0 ? "+" : ""}${pct.toFixed(4)} USDC | size ${fmtAmt(size, usdc.dec)} USDC | ${label}`);
   }, HEARTBEAT_INTERVAL_MS);
 
   function connect() {
@@ -144,7 +139,7 @@ async function monitor() {
   }
 
   connect();
-  console.log(`Monitor started  min_profit=${MIN_PROFIT_USDC} USDC  executor=${tryExecute ? "on" : "off"}`);
+  console.log(`Monitor started  pools=${poolAddrs.length} routes=${routeCount}  min_profit=${MIN_PROFIT_USDC} USDC  executor=${tryExecute ? "on" : "off"}`);
 }
 
 monitor().catch(console.error);
