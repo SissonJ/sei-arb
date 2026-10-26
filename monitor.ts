@@ -3,6 +3,7 @@ import {
   getBySymbol, fmtAmt,
 } from "./lib";
 import type { PoolInfo } from "./lib";
+import { createExecutor, FLASH_FEE } from "./executor";
 
 const SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
 const MIN_PROFIT_USDC = 1.0;
@@ -11,6 +12,10 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const SEI_WS = Bun.env.SEI_WS!;
 const PUSHOVER_TOKEN = Bun.env.PUSHOVER_TOKEN!;
 const PUSHOVER_USER = Bun.env.PUSHOVER_USER!;
+// Optional: without ARB_CONTRACT the monitor only reports opportunities
+const ARB_CONTRACT = Bun.env.ARB_CONTRACT;
+const ARB_PRIVATE_KEY = Bun.env.ARB_PRIVATE_KEY;
+const ARB_SEND = Bun.env.ARB_SEND === "1";
 
 async function notify(title: string, message: string) {
   await fetch("https://api.pushover.net/1/messages.json", {
@@ -55,6 +60,18 @@ async function monitor() {
     wbtc: getBySymbol(dsWseiWbtc, "WBTC"),
   };
 
+  const tryExecute = ARB_CONTRACT
+    ? await createExecutor({
+        rpc: Bun.env.SEI_RPC!,
+        contract: ARB_CONTRACT,
+        privateKey: ARB_PRIVATE_KEY!,
+        token: tokenRefs.usdc,
+        minProfit: BigInt(Math.round(MIN_PROFIT_USDC * 10 ** tokenRefs.usdc.dec)),
+        send: ARB_SEND,
+        notify: (title, message) => { notify(title, message).catch(console.error); },
+      })
+    : undefined;
+
   let swapCount = 0;
   let lastBest = { pct: -Infinity, label: "", size: 0n };
 
@@ -69,15 +86,24 @@ async function monitor() {
     const routes = buildRoutes(p0, p1, p2, p3, p4, tokenRefs.usdc, tokenRefs.wsei, tokenRefs.wbtc);
 
     let best = { pct: -Infinity, label: "", size: 0n };
+    let bestHops = routes[0]!.hops;
     for (const { label, hops } of routes) {
       const { optimalInput, maxProfit } = findOptimalInput(hops, tokenRefs.usdc.dec);
-      if (maxProfit > best.pct) best = { pct: maxProfit, label, size: optimalInput };
-      if (maxProfit >= MIN_PROFIT_USDC) {
-        const msg = `size ${fmtAmt(optimalInput, tokenRefs.usdc.dec)} USDC → +${maxProfit.toFixed(4)} USDC | ${label}`;
+      const netProfit = maxProfit - (Number(optimalInput) / 10 ** tokenRefs.usdc.dec) * FLASH_FEE;
+      if (netProfit > best.pct) {
+        best = { pct: netProfit, label, size: optimalInput };
+        bestHops = hops;
+      }
+      if (netProfit >= MIN_PROFIT_USDC) {
+        const msg = `size ${fmtAmt(optimalInput, tokenRefs.usdc.dec)} USDC → +${netProfit.toFixed(4)} USDC | ${label}`;
         notify("Sei Arb OPPORTUNITY", msg).catch(console.error);
       }
     }
     lastBest = best;
+
+    if (tryExecute && best.pct >= MIN_PROFIT_USDC) {
+      tryExecute(best.label, bestHops, best.size);
+    }
   }
 
   setInterval(() => {
@@ -118,7 +144,7 @@ async function monitor() {
   }
 
   connect();
-  console.log(`Monitor started  min_profit=${MIN_PROFIT_USDC} USDC`);
+  console.log(`Monitor started  min_profit=${MIN_PROFIT_USDC} USDC  executor=${tryExecute ? "on" : "off"}`);
 }
 
 monitor().catch(console.error);

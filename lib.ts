@@ -1,3 +1,5 @@
+import { HDNodeWallet, Wallet } from "ethers";
+
 const SEI_RPC = Bun.env.SEI_RPC!;
 
 export const POOLS = {
@@ -405,4 +407,11 @@ export function findOptimalInput(
   const optimalInput = (lo + hi) / 2n;
   const maxProfit = computeRoute("", hops, optimalInput, inputDecimals).profit;
   return { optimalInput, maxProfit };
+}
+
+// Accepts a private key or a mnemonic (first account, path m/44'/60'/0'/0/0).
+// A mnemonic has spaces between its words, and a private key has none.
+export function loadWallet(secret: string): Wallet | HDNodeWallet {
+  const s = secret.trim();
+  return s.includes(" ") ? Wallet.fromPhrase(s) : new Wallet(s);
 }

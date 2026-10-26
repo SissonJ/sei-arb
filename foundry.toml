@@ -1,0 +1,12 @@
+[profile.default]
+src = "contracts"
+test = "contracts/test"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 1000000
+
+[rpc_endpoints]
+sei = "${SEI_MAINNET_RPC}"
