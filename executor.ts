@@ -17,6 +17,13 @@ const GAS_LIMIT = 1_500_000n;
 // The local model assumes constant liquidity and can overestimate the best size,
 // so the executor also simulates smaller sizes and sends the one with the highest real profit
 const SIZE_DIVISORS = [1n, 2n, 4n, 8n];
+// The sent transaction must keep at least this share of the simulated profit, or it reverts.
+// A bot that trades first can then take at most the rest. A higher share gives more reverts
+// when normal swaps move the price between the simulation and the block.
+const MIN_PROFIT_SHARE_BPS = 5_000n;
+// Sei confirms a transaction in about one second. A transaction that is not mined in this time
+// was probably dropped, so the executor stops waiting and takes new opportunities again.
+const CONFIRM_TIMEOUT_MS = 30_000;
 
 const ABI = [
   "function execute(address flashPool, address token, uint256 amount, (address pool, bool zeroForOne)[] hops, uint256 minProfit) returns (uint256 profit)",
@@ -91,14 +98,24 @@ export async function createExecutor(cfg: ExecutorConfig) {
         return;
       }
 
-      const tx = await execute(flashPool, cfg.token.addr, best.amount, callHops, cfg.minProfit, { gasLimit: GAS_LIMIT });
-      console.log(`[exec] sent ${tx.hash} ${summary}`);
-      // wait() throws if the transaction reverts
-      const receipt = await tx.wait();
-      console.log(`[exec] confirmed ${tx.hash} gasUsed=${receipt?.gasUsed}`);
-      cfg.notify("Sei Arb EXECUTED", `${summary}\ntx ${tx.hash}`);
+      const shareMin = (best.profit * MIN_PROFIT_SHARE_BPS) / 10_000n;
+      const minProfit = shareMin > cfg.minProfit ? shareMin : cfg.minProfit;
+      const tx = await execute(flashPool, cfg.token.addr, best.amount, callHops, minProfit, { gasLimit: GAS_LIMIT });
+      console.log(`[exec] sent ${tx.hash} min_profit=${fmt(minProfit)} ${summary}`);
+      // wait() throws if the transaction reverts, and throws TIMEOUT if it is not mined in time
+      try {
+        const receipt = await tx.wait(1, CONFIRM_TIMEOUT_MS);
+        console.log(`[exec] confirmed ${tx.hash} gasUsed=${receipt?.gasUsed}`);
+        cfg.notify("Sei Arb EXECUTED", `${summary}\ntx ${tx.hash}`);
+      } catch (err) {
+        if ((err as { code?: string }).code !== "TIMEOUT") throw err;
+        console.error(`[exec] not mined after ${CONFIRM_TIMEOUT_MS / 1000}s, continuing ${tx.hash}`);
+        cfg.notify("Sei Arb TX TIMEOUT", `not mined after ${CONFIRM_TIMEOUT_MS / 1000}s\ntx ${tx.hash}`);
+      }
     } catch (err) {
-      console.error("[exec] error:", (err as { shortMessage?: string }).shortMessage ?? err);
+      // For an RPC error that ethers cannot classify, shortMessage alone is "could not coalesce error"
+      const e = err as { shortMessage?: string; error?: unknown };
+      console.error("[exec] error:", e.shortMessage ?? err, e.error ? JSON.stringify(e.error) : "");
     } finally {
       busy = false;
     }
