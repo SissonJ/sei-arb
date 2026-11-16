@@ -97,7 +97,7 @@ async function monitor() {
     lastBest = best;
 
     if (tryExecute && best.pct >= MIN_PROFIT_USDC) {
-      tryExecute(best.label, bestHops, best.size);
+      tryExecute(best.label, bestHops, best.size, best.pct);
     }
   }
 

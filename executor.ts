@@ -29,6 +29,8 @@ const ABI = [
   "function execute(address flashPool, address token, uint256 amount, (address pool, bool zeroForOne)[] hops, uint256 minProfit) returns (uint256 profit)",
   "error Unprofitable(uint256 balance, uint256 required)",
   "error NotOwner()",
+  "error UnexpectedCaller()",
+  "error TransferFailed()",
 ];
 
 export interface ExecutorConfig {
@@ -41,7 +43,15 @@ export interface ExecutorConfig {
   notify: (title: string, message: string) => void;
 }
 
-type SimResult = { amount: bigint; profit: bigint } | { amount: bigint; error: string };
+// pnl is the real profit or loss of the cycle after the loan fee
+type SimResult = { amount: bigint; pnl: bigint } | { amount: bigint; error: string };
+
+// ethers puts "unknown custom error" in shortMessage even when it decodes the error into revert
+function errorText(err: unknown): string {
+  const e = err as { revert?: { name: string; args: unknown[] }; shortMessage?: string };
+  if (e.revert) return `${e.revert.name}(${e.revert.args.join(", ")})`;
+  return e.shortMessage ?? String(err);
+}
 
 export async function createExecutor(cfg: ExecutorConfig) {
   const provider = new JsonRpcProvider(cfg.rpc);
@@ -55,18 +65,22 @@ export async function createExecutor(cfg: ExecutorConfig) {
   const fmt = (x: bigint) => fmtAmt(x, cfg.token.dec);
   let busy = false;
 
+  // Simulates with minProfit 0, so that the result shows the real profit or loss at this size.
+  // An unprofitable cycle reverts with Unprofitable(balance, required), and the loss is balance - required.
   async function simulate(flashPool: string, hops: object[], amount: bigint): Promise<SimResult> {
     try {
-      const profit: bigint = await execute.staticCall(flashPool, cfg.token.addr, amount, hops, cfg.minProfit);
-      return { amount, profit };
+      const pnl: bigint = await execute.staticCall(flashPool, cfg.token.addr, amount, hops, 0n);
+      return { amount, pnl };
     } catch (err) {
-      return { amount, error: (err as { shortMessage?: string }).shortMessage ?? String(err) };
+      const revert = (err as { revert?: { name: string; args: bigint[] } }).revert;
+      if (revert?.name === "Unprofitable") return { amount, pnl: revert.args[0]! - revert.args[1]! };
+      return { amount, error: errorText(err) };
     }
   }
 
   // Simulates the route at several sizes and sends the most profitable one.
   // Skips the opportunity if a previous one is still in flight.
-  async function tryExecute(label: string, hops: Hop[], modelAmount: bigint) {
+  async function tryExecute(label: string, hops: Hop[], modelAmount: bigint, modelProfit: number) {
     if (busy) return;
     busy = true;
     try {
@@ -81,24 +95,27 @@ export async function createExecutor(cfg: ExecutorConfig) {
       }));
 
       const sims = await Promise.all(SIZE_DIVISORS.map((d) => simulate(flashPool, callHops, modelAmount / d)));
-      let best: { amount: bigint; profit: bigint } | undefined;
+      // Compares the real result at each size with the model, to measure the error of the model
+      const results = sims.map((s) => `${fmt(s.amount)}: ${"pnl" in s ? `${s.pnl >= 0n ? "+" : ""}${fmt(s.pnl)}` : s.error}`);
+      console.log(`[exec] sim | model +${modelProfit.toFixed(4)} at ${fmt(modelAmount)} USDC | real ${results.join("  ")} | ${label}`);
+
+      let best: { amount: bigint; pnl: bigint } | undefined;
       for (const s of sims) {
-        if ("profit" in s && (!best || s.profit > best.profit)) best = s;
+        if ("pnl" in s && s.pnl >= cfg.minProfit && (!best || s.pnl > best.pnl)) best = s;
       }
       if (!best) {
-        const first = sims[0];
-        console.log(`[exec] no profitable size | ${label} | ${first && "error" in first ? first.error : ""}`);
+        console.log(`[exec] no profitable size | ${label}`);
         return;
       }
 
-      const summary = `size ${fmt(best.amount)} USDC → +${fmt(best.profit)} USDC | ${label}`;
+      const summary = `size ${fmt(best.amount)} USDC → +${fmt(best.pnl)} USDC | ${label}`;
       if (!cfg.send) {
         console.log(`[exec] simulated (send disabled) ${summary}`);
         cfg.notify("Sei Arb SIMULATED", summary);
         return;
       }
 
-      const shareMin = (best.profit * MIN_PROFIT_SHARE_BPS) / 10_000n;
+      const shareMin = (best.pnl * MIN_PROFIT_SHARE_BPS) / 10_000n;
       const minProfit = shareMin > cfg.minProfit ? shareMin : cfg.minProfit;
       const tx = await execute(flashPool, cfg.token.addr, best.amount, callHops, minProfit, { gasLimit: GAS_LIMIT });
       console.log(`[exec] sent ${tx.hash} min_profit=${fmt(minProfit)} ${summary}`);
@@ -114,8 +131,8 @@ export async function createExecutor(cfg: ExecutorConfig) {
       }
     } catch (err) {
       // For an RPC error that ethers cannot classify, shortMessage alone is "could not coalesce error"
-      const e = err as { shortMessage?: string; error?: unknown };
-      console.error("[exec] error:", e.shortMessage ?? err, e.error ? JSON.stringify(e.error) : "");
+      const e = err as { error?: unknown };
+      console.error("[exec] error:", errorText(err), e.error ? JSON.stringify(e.error) : "");
     } finally {
       busy = false;
     }
